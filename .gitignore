@@ -1,0 +1,24 @@
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.opendb
+
+# Build results
+x64/
+x86/
+Debug/
+Release/
+*.exe
+*.dll
+*.obj
+*.pdb
+*.lib
+*.exp
+
+# Temporary files
+*.log
+*.tmp
+
+# Windows system files
+Thumbs.db
+.DS_Store

@@ -1,0 +1,15 @@
+[
+  {
+    "Name": "새 프로필",
+    "Projects": [
+      {
+        "Path": "TCPserver\\TCPserver.vcxproj",
+        "Action": "Start"
+      },
+      {
+        "Path": "TCPClient\\TCPClient.vcxproj",
+        "Action": "Start"
+      }
+    ]
+  }
+]
