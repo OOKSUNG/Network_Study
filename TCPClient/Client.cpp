@@ -3,28 +3,43 @@
 #include <Ws2tcpip.h> // InetPton 사용
 #include <winsock2.h> // win2_32.lib의 선언이 있는 헤더 파일입니다.
 #include <thread>
+#include "Packet.h"
 using namespace std;
 
-#define PACKET_SIZE 1024
+#define PACKET_SIZE 2048
 
 SOCKET skt;
 
+bool ReceivePacket(SOCKET skt, PacketReader& outPacket) {
+	// 1. 헤더 수신 (Size 4 + Type 2 = 6바이트)
+	int recvLen = recv(skt, (char*)outPacket.buffer, 6, 0);
+	if (recvLen != 6) return false;
+
+	// 2. 헤더 해석 (내부 offset이 6으로 이동)
+	uint32_t totalSize = outPacket.readSize();
+	uint16_t type = outPacket.readType();
+	uint32_t bodySize = totalSize - 6;
+
+	// 3. 바디 데이터 완성이 될 때까지 수신
+	uint32_t totalReceivedBody = 0;
+	while (totalReceivedBody < bodySize) {
+		int ret = recv(skt, (char*)outPacket.buffer + outPacket.offset + totalReceivedBody,
+			bodySize - totalReceivedBody, 0);
+		if (ret <= 0) return false;
+		totalReceivedBody += ret;
+	}
+
+	return true; // 패킷 하나가 완벽하게 조립됨
+}
+
 void proc_recv() {
-	char buffer[PACKET_SIZE] = {}; // 받은 메시지를 저장할 char 배열
 	while (true) {
-		// buffer 배열을 0으로 채워준다.
-		ZeroMemory(&buffer, PACKET_SIZE); // ZeroMemory(PVOID Destination, SIZE_T Length)
-		// 수신된 데이터의 실제 바이트 수를 ret 변수에 반환한다.
-		int ret = recv(skt, buffer, PACKET_SIZE - 1, 0); // int recv(SOCKET s, char *buf, int len, int flags);
-		if (ret > 0) {
-			buffer[ret] = '\0';		// buffer의 마지막에 줄바꿈 추가
-			cout << "\n" << buffer << endl;		// 받은 메시지 출력
-			cout.flush();			// 출력 스티림 버퍼를 비워 버퍼에 남아 있는 데이터를 즉시 터미널에 출력
-		}
-		// recv는 상대의 소켓이 닫았다면 0을 반환, 오류시 SOCKET_ERROR 반환
-		else {
-			break;
-		}
+		PacketReader pr;
+		
+		ReceivePacket(skt, pr);
+
+		cout << "\n" << pr.readString() << endl;
+		cout.flush();
 	}
 }
 
@@ -34,9 +49,9 @@ int main() {
 	// WSAStartup 함수가 wsa 초기화
 	int result = WSAStartup(MAKEWORD(2, 2), &wsa);
 	if (result != 0) return 1;
-	
+
 	// 소켓 생성
-	skt = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP); 
+	skt = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 	// PF_INET: IPv4 인터넷 프로토콜
 	// SOCK_STREAM: TCP 소켓 타입
 	// IPPROTO_TCP: TCP 프로토콜 사용
@@ -53,12 +68,19 @@ int main() {
 		if (!connect(skt, (SOCKADDR*)&addr, sizeof(addr))) break;
 	}
 
+	// 닉네임 패킷
+	Packet p(JOIN);
+
+
 	// 서버와 연결시 닉네임 설정
 	cout << "Please enter your nickname: ";
 	char nickname[100];
 	cin >> nickname;
+	cin.ignore();
+	p.writeString(nickname);
+	p.finalize();
 	// send(소켓, 버퍼에 대한 포인터, 버퍼의 데이터 길이, flag)
-	send(skt, nickname, (int)strlen(nickname), 0);
+	send(skt, p.buffer, p.offset, 0);
 
 	// 스레드 생성
 	thread proc1(proc_recv);
@@ -67,8 +89,11 @@ int main() {
 	char msg[PACKET_SIZE] = { 0 };
 
 	while (true) {
+		Packet p(CHAT);
 		cin.getline(msg, PACKET_SIZE);		// 공백을 포함한 메시지 입력
-		int ret = send(skt, msg, (int)strlen(msg), 0);
+		p.writeString(msg);
+		p.finalize();
+		int ret = send(skt, p.buffer, (int)p.offset, 0);
 		if (ret < 0) break;					// send는 전송된 총 바이트 수를 반환 
 	}
 

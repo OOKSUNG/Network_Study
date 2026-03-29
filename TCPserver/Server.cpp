@@ -6,31 +6,56 @@
 #include <mutex>
 #include <algorithm>
 #include <utility>
+#include "Packet.h"
+
 
 using namespace std;
 
-#define PACKET_SIZE 1024
+#define PACKET_SIZE 2048
 SOCKET skt;		
 mutex mtx;		
 // 클라이언트 마다 할당한 소켓 관리 {소켓, 닉네임}
-vector<pair<SOCKET, string>> clients;
+struct Client {
+	SOCKET sock;
+	string nickname;
+};
+vector<Client> clients;
+
+bool ReceivePacket(SOCKET skt, PacketReader& outPacket) {
+	// 헤더 수신 (Size 4 + Type 2 = 6바이트)
+	int recvLen = recv(skt, (char*)outPacket.buffer, 6, 0);
+	if (recvLen != 6) return false;
+
+	// 헤더 해석 (내부 offset이 6으로 이동)
+	uint32_t totalSize = outPacket.readSize();
+	uint16_t type = outPacket.readType();
+	uint32_t bodySize = totalSize - 6;
+
+	// 바디 데이터 완성이 될 때까지 수신
+	uint32_t totalReceivedBody = 0;
+	while (totalReceivedBody < bodySize) {
+		int ret = recv(skt, (char*)outPacket.buffer + outPacket.offset + totalReceivedBody,
+			bodySize - totalReceivedBody, 0);
+		if (ret <= 0) return false;
+		totalReceivedBody += ret;
+	}
+
+	return true; 
+}
 
 void handle_client(SOCKET client_sock) {
-	// 입력받을 버퍼와 nickname
-	char buffer[PACKET_SIZE];
-	string nickname;
-
 	// 닉네임을 입력 받는다.
-	int ret = recv(client_sock, buffer, PACKET_SIZE - 1, 0);
-	if (ret <= 0) return;
-	buffer[ret] = '\0';
-	nickname = buffer;
+	string nickname;
+	PacketReader pr;
+
+	ReceivePacket(client_sock, pr);
+	nickname = pr.readString();
 
 	// clients는 공유 자원이므로 보호한다.
 	mtx.lock();
-	for (auto& p : clients) {
-		if (p.first == client_sock) {	// 닉네임을 입력받은 소켓이라면
-			p.second = nickname;		// 해당 pair의 nickname을 저장
+	for (auto& c : clients) {
+		if (c.sock == client_sock) {	// 닉네임을 입력받은 소켓이라면
+			c.nickname = nickname;		// 해당 pair의 nickname을 저장
 		}
 	}
 	mtx.unlock();
@@ -39,9 +64,13 @@ void handle_client(SOCKET client_sock) {
 	string msg = nickname + " joined";
 
 	// 다른 클라이언트 들에게 접속 문자열 전송
+	Packet p(CHAT);
+	p.writeString(msg);
+	p.finalize();
+
 	mtx.lock();
-	for (auto& p : clients) {
-		if (p.first != client_sock) send(p.first, msg.c_str(), (int)msg.length(), 0);
+	for (auto& c : clients) {
+		if (c.sock != client_sock) send(c.sock, p.buffer, (int)p.offset, 0);
 	}
 	mtx.unlock();
 
@@ -49,23 +78,30 @@ void handle_client(SOCKET client_sock) {
 	cout << "[JOIN] " << nickname << endl;
 
 	while (true) {
-		ZeroMemory(buffer, PACKET_SIZE);
+		//ZeroMemory(buffer, PACKET_SIZE);
 
-		int ret = recv(client_sock, buffer, PACKET_SIZE - 1, 0);
+		//int ret = recv(client_sock, buffer, PACKET_SIZE - 1, 0);
 
-		if (ret <= 0) { 
+		PacketReader pr;
+		bool isRet = ReceivePacket(client_sock, pr);
+		
+		if (!isRet) { 
 			// 접속 종료시 left 알림
 			string msg = nickname + " left";
+			Packet p(CHAT);
+			p.writeString(msg);
+			p.finalize();
+
 			mtx.lock();
 			// 모든 클라이언트에게 알림
-			for (auto& p : clients) {
-				if (p.first != client_sock) send(p.first, msg.c_str(), (int)msg.length(), 0);
+			for (auto& c : clients) {
+				if (c.sock != client_sock) send(c.sock, p.buffer, (int)p.offset, 0);
 			}
 			
 			// 배열에서 접속 종료한 클라이언트 정보 제거
 			clients.erase(std::remove_if(clients.begin(), clients.end(),
-				[client_sock](const pair<SOCKET, string>& p) {
-					return p.first == client_sock;
+				[client_sock](const Client& c) {
+					return c.sock == client_sock;
 				}), clients.end());
 			mtx.unlock();
 			closesocket(client_sock);
@@ -73,15 +109,18 @@ void handle_client(SOCKET client_sock) {
 			break;
 		}
 
-		buffer[ret] = '\0';
-		string full_msg = "[" + nickname + "]: " + buffer;
+		string full_msg = "[" + nickname + "]: " + pr.readString();
 		cout << "[MSG] " << full_msg << endl;
+
+		Packet p(CHAT);
+		p.writeString(full_msg);
+		p.finalize();
 
 		// 메세지를 보낸 클라이언트를 제외하고 메세지를 보냄
 		mtx.lock();
-		for (auto& p : clients) {
-			if (p.first != client_sock) {
-				send(p.first, full_msg.c_str(), (int)full_msg.length(), 0);
+		for (auto& c : clients) {
+			if (c.sock != client_sock) {
+				send(c.sock, p.buffer, (int)p.offset, 0);
 			}
 		}
 		mtx.unlock();
@@ -122,8 +161,8 @@ int main() {
 	}
 
 	// 모든 클라이언트 소켓을 닫는다
-	for (pair<SOCKET,string> target : clients) {
-		closesocket(target.first);
+	for (auto& c : clients) {
+		closesocket(c.sock);
 	}
 	clients.clear(); // vector 정리
 
